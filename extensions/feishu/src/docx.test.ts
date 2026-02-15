@@ -102,9 +102,9 @@ describe("feishu_doc image fetch hardening", () => {
       registerTool,
     } as any);
 
-    const feishuDocTool = registerTool.mock.calls
-      .map((call) => call[0])
-      .find((tool) => tool.name === "feishu_doc");
+    const docCall = registerTool.mock.calls.find((call) => call[1]?.name === "feishu_doc");
+    const docFactory = docCall?.[0] as unknown as ((ctx: unknown) => any);
+    const feishuDocTool = docFactory?.({ agentId: "main" });
     expect(feishuDocTool).toBeDefined();
 
     const result = await feishuDocTool.execute("tool-call", {

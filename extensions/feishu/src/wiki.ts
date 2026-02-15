@@ -1,11 +1,27 @@
 import type * as Lark from "@larksuiteoapi/node-sdk";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { listEnabledFeishuAccounts } from "./accounts.js";
+import type { ClawdbotConfig, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { resolveFeishuAccountForAgent } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { resolveToolsConfig } from "./tools-config.js";
 import { FeishuWikiSchema, type FeishuWikiParams } from "./wiki-schema.js";
 
 // ============ Helpers ============
+
+function readAgentId(ctx: unknown): string | undefined {
+  if (!ctx || typeof ctx !== "object") {
+    return undefined;
+  }
+  const agentId = (ctx as { agentId?: unknown }).agentId;
+  return typeof agentId === "string" ? agentId : undefined;
+}
+
+function readConfig(ctx: unknown) {
+  if (!ctx || typeof ctx !== "object") {
+    return undefined;
+  }
+  const cfg = (ctx as { config?: unknown }).config;
+  return cfg && typeof cfg === "object" ? (cfg as Record<string, unknown>) : undefined;
+}
 
 function json(data: unknown) {
   return {
@@ -157,76 +173,75 @@ async function renameNode(client: Lark.Client, spaceId: string, nodeToken: strin
 // ============ Tool Registration ============
 
 export function registerFeishuWikiTools(api: OpenClawPluginApi) {
-  if (!api.config) {
-    api.logger.debug?.("feishu_wiki: No config available, skipping wiki tools");
-    return;
-  }
-
-  const accounts = listEnabledFeishuAccounts(api.config);
-  if (accounts.length === 0) {
-    api.logger.debug?.("feishu_wiki: No Feishu accounts configured, skipping wiki tools");
-    return;
-  }
-
-  const firstAccount = accounts[0];
-  const toolsCfg = resolveToolsConfig(firstAccount.config.tools);
-  if (!toolsCfg.wiki) {
-    api.logger.debug?.("feishu_wiki: wiki tool disabled in config");
-    return;
-  }
-
-  const getClient = () => createFeishuClient(firstAccount);
-
   api.registerTool(
-    {
-      name: "feishu_wiki",
-      label: "Feishu Wiki",
-      description:
-        "Feishu knowledge base operations. Actions: spaces, nodes, get, create, move, rename",
-      parameters: FeishuWikiSchema,
-      async execute(_toolCallId, params) {
-        const p = params as FeishuWikiParams;
-        try {
-          const client = getClient();
-          switch (p.action) {
-            case "spaces":
-              return json(await listSpaces(client));
-            case "nodes":
-              return json(await listNodes(client, p.space_id, p.parent_node_token));
-            case "get":
-              return json(await getNode(client, p.token));
-            case "search":
-              return json({
-                error:
-                  "Search is not available. Use feishu_wiki with action: 'nodes' to browse or action: 'get' to lookup by token.",
-              });
-            case "create":
-              return json(
-                await createNode(client, p.space_id, p.title, p.obj_type, p.parent_node_token),
-              );
-            case "move":
-              return json(
-                await moveNode(
-                  client,
-                  p.space_id,
-                  p.node_token,
-                  p.target_space_id,
-                  p.target_parent_token,
-                ),
-              );
-            case "rename":
-              return json(await renameNode(client, p.space_id, p.node_token, p.title));
-            default:
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- exhaustive check fallback
-              return json({ error: `Unknown action: ${(p as any).action}` });
+    (ctx) => {
+      const cfg = (readConfig(ctx) ?? api.config) as ClawdbotConfig | undefined;
+      if (!cfg) {
+        return null;
+      }
+
+      const account = resolveFeishuAccountForAgent({ cfg, agentId: readAgentId(ctx) });
+      if (!account.enabled || !account.configured) {
+        return null;
+      }
+
+      const toolsCfg = resolveToolsConfig(account.config.tools);
+      if (!toolsCfg.wiki) {
+        return null;
+      }
+
+      const getClient = () => createFeishuClient(account);
+
+      return {
+        name: "feishu_wiki",
+        label: "Feishu Wiki",
+        description:
+          "Feishu knowledge base operations. Actions: spaces, nodes, get, create, move, rename",
+        parameters: FeishuWikiSchema,
+        async execute(_toolCallId, params) {
+          const p = params as FeishuWikiParams;
+          try {
+            const client = getClient();
+            switch (p.action) {
+              case "spaces":
+                return json(await listSpaces(client));
+              case "nodes":
+                return json(await listNodes(client, p.space_id, p.parent_node_token));
+              case "get":
+                return json(await getNode(client, p.token));
+              case "search":
+                return json({
+                  error:
+                    "Search is not available. Use feishu_wiki with action: 'nodes' to browse or action: 'get' to lookup by token.",
+                });
+              case "create":
+                return json(
+                  await createNode(client, p.space_id, p.title, p.obj_type, p.parent_node_token),
+                );
+              case "move":
+                return json(
+                  await moveNode(
+                    client,
+                    p.space_id,
+                    p.node_token,
+                    p.target_space_id,
+                    p.target_parent_token,
+                  ),
+                );
+              case "rename":
+                return json(await renameNode(client, p.space_id, p.node_token, p.title));
+              default:
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any -- exhaustive check fallback
+                return json({ error: `Unknown action: ${(p as any).action}` });
+            }
+          } catch (err) {
+            return json({ error: err instanceof Error ? err.message : String(err) });
           }
-        } catch (err) {
-          return json({ error: err instanceof Error ? err.message : String(err) });
-        }
-      },
+        },
+      };
     },
     { name: "feishu_wiki" },
   );
 
-  api.logger.info?.(`feishu_wiki: Registered feishu_wiki tool`);
+  api.logger.info?.("feishu_wiki: Registered feishu_wiki tool");
 }

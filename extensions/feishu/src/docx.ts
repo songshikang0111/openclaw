@@ -1,14 +1,30 @@
 import type * as Lark from "@larksuiteoapi/node-sdk";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { ClawdbotConfig, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
 import { Readable } from "stream";
-import { listEnabledFeishuAccounts } from "./accounts.js";
+import { resolveFeishuAccountForAgent } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { FeishuDocSchema, type FeishuDocParams } from "./doc-schema.js";
 import { getFeishuRuntime } from "./runtime.js";
 import { resolveToolsConfig } from "./tools-config.js";
 
 // ============ Helpers ============
+
+function readAgentId(ctx: unknown): string | undefined {
+  if (!ctx || typeof ctx !== "object") {
+    return undefined;
+  }
+  const agentId = (ctx as { agentId?: unknown }).agentId;
+  return typeof agentId === "string" ? agentId : undefined;
+}
+
+function readConfig(ctx: unknown) {
+  if (!ctx || typeof ctx !== "object") {
+    return undefined;
+  }
+  const cfg = (ctx as { config?: unknown }).config;
+  return cfg && typeof cfg === "object" ? (cfg as Record<string, unknown>) : undefined;
+}
 
 function json(data: unknown) {
   return {
@@ -442,31 +458,27 @@ async function listAppScopes(client: Lark.Client) {
 // ============ Tool Registration ============
 
 export function registerFeishuDocTools(api: OpenClawPluginApi) {
-  if (!api.config) {
-    api.logger.debug?.("feishu_doc: No config available, skipping doc tools");
-    return;
-  }
+  api.registerTool(
+    (ctx) => {
+      const cfg = (readConfig(ctx) ?? api.config) as ClawdbotConfig | undefined;
+      if (!cfg) {
+        return null;
+      }
 
-  // Check if any account is configured
-  const accounts = listEnabledFeishuAccounts(api.config);
-  if (accounts.length === 0) {
-    api.logger.debug?.("feishu_doc: No Feishu accounts configured, skipping doc tools");
-    return;
-  }
+      const account = resolveFeishuAccountForAgent({ cfg, agentId: readAgentId(ctx) });
+      if (!account.enabled || !account.configured) {
+        return null;
+      }
 
-  // Use first account's config for tools configuration
-  const firstAccount = accounts[0];
-  const toolsCfg = resolveToolsConfig(firstAccount.config.tools);
-  const mediaMaxBytes = (firstAccount.config?.mediaMaxMb ?? 30) * 1024 * 1024;
+      const toolsCfg = resolveToolsConfig(account.config.tools);
+      if (!toolsCfg.doc) {
+        return null;
+      }
 
-  // Helper to get client for the default account
-  const getClient = () => createFeishuClient(firstAccount);
-  const registered: string[] = [];
+      const mediaMaxBytes = (account.config?.mediaMaxMb ?? 30) * 1024 * 1024;
+      const getClient = () => createFeishuClient(account);
 
-  // Main document tool with action-based dispatch
-  if (toolsCfg.doc) {
-    api.registerTool(
-      {
+      return {
         name: "feishu_doc",
         label: "Feishu Doc",
         description:
@@ -501,16 +513,31 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
             return json({ error: err instanceof Error ? err.message : String(err) });
           }
         },
-      },
-      { name: "feishu_doc" },
-    );
-    registered.push("feishu_doc");
-  }
+      };
+    },
+    { name: "feishu_doc" },
+  );
 
-  // Keep feishu_app_scopes as independent tool
-  if (toolsCfg.scopes) {
-    api.registerTool(
-      {
+  api.registerTool(
+    (ctx) => {
+      const cfg = (readConfig(ctx) ?? api.config) as ClawdbotConfig | undefined;
+      if (!cfg) {
+        return null;
+      }
+
+      const account = resolveFeishuAccountForAgent({ cfg, agentId: readAgentId(ctx) });
+      if (!account.enabled || !account.configured) {
+        return null;
+      }
+
+      const toolsCfg = resolveToolsConfig(account.config.tools);
+      if (!toolsCfg.scopes) {
+        return null;
+      }
+
+      const getClient = () => createFeishuClient(account);
+
+      return {
         name: "feishu_app_scopes",
         label: "Feishu App Scopes",
         description:
@@ -524,13 +551,10 @@ export function registerFeishuDocTools(api: OpenClawPluginApi) {
             return json({ error: err instanceof Error ? err.message : String(err) });
           }
         },
-      },
-      { name: "feishu_app_scopes" },
-    );
-    registered.push("feishu_app_scopes");
-  }
+      };
+    },
+    { name: "feishu_app_scopes" },
+  );
 
-  if (registered.length > 0) {
-    api.logger.info?.(`feishu_doc: Registered ${registered.join(", ")}`);
-  }
+  api.logger.info?.("feishu_doc: Registered feishu_doc, feishu_app_scopes (agent-aware)");
 }
