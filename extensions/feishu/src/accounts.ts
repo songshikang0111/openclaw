@@ -8,6 +8,22 @@ import type {
 } from "./types.js";
 
 /**
+ * Returns true when the given accountId exists in channels.feishu.accounts.
+ *
+ * NOTE: This is intentionally a raw key check. We use it to decide whether we
+ * should treat an agentId as an accountId (multi-agent setups often key accounts
+ * by agent id). If the key does not exist, we fall back to the default account.
+ */
+export function hasFeishuAccountId(cfg: ClawdbotConfig, accountId: string): boolean {
+  const feishuCfg = cfg.channels?.feishu as FeishuConfig | undefined;
+  const accounts = feishuCfg?.accounts;
+  if (!accounts || typeof accounts !== "object") {
+    return false;
+  }
+  return Object.prototype.hasOwnProperty.call(accounts, accountId);
+}
+
+/**
  * List all configured account IDs from the accounts field.
  */
 function listConfiguredAccountIds(cfg: ClawdbotConfig): string[] {
@@ -141,4 +157,25 @@ export function listEnabledFeishuAccounts(cfg: ClawdbotConfig): ResolvedFeishuAc
   return listFeishuAccountIds(cfg)
     .map((accountId) => resolveFeishuAccount({ cfg, accountId }))
     .filter((account) => account.enabled && account.configured);
+}
+
+/**
+ * Resolve the Feishu account for a given agent id.
+ *
+ * Behavior:
+ * - If `channels.feishu.accounts[agentId]` exists, use it.
+ * - Otherwise fall back to the default Feishu account id.
+ *
+ * This avoids the "first account alphabetically" behavior in multi-agent
+ * configurations where each agent binds a different Feishu app.
+ */
+export function resolveFeishuAccountForAgent(params: {
+  cfg: ClawdbotConfig;
+  agentId?: string | null;
+}): ResolvedFeishuAccount {
+  const agentKey = normalizeAccountId(params.agentId);
+  const accountId = hasFeishuAccountId(params.cfg, agentKey)
+    ? agentKey
+    : resolveDefaultFeishuAccountId(params.cfg);
+  return resolveFeishuAccount({ cfg: params.cfg, accountId });
 }
